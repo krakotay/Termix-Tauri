@@ -1,15 +1,14 @@
 # Stage 1: Install dependencies
-FROM node:24-slim AS deps
+FROM oven/bun:1-debian AS deps
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y python3 make g++ && rm -rf /var/lib/apt/lists/*
 
-COPY package*.json ./
+COPY package.json bun.lock ./
 COPY .npmrc ./
 COPY vendor ./vendor
 
-RUN npm ci --ignore-scripts && \
-    npm cache clean --force
+RUN bun install --frozen-lockfile
 
 # Stage 2: Build frontend
 FROM deps AS frontend-builder
@@ -19,8 +18,7 @@ COPY . .
 
 RUN find public/fonts -name "*.ttf" ! -name "*Regular.ttf" ! -name "*Bold.ttf" ! -name "*Italic.ttf" -delete
 
-RUN npm cache clean --force && \
-    NODE_OPTIONS="--max-old-space-size=3072" npm run build
+RUN NODE_OPTIONS="--max-old-space-size=3072" bun run build:web
 
 # Stage 3: Build backend
 FROM deps AS backend-builder
@@ -28,23 +26,19 @@ WORKDIR /app
 
 COPY . .
 
-RUN npm rebuild better-sqlite3
-
-RUN npm run build:backend
+RUN bun run build:backend
 
 # Stage 4: Production dependencies only
-FROM node:24-slim AS production-deps
+FROM oven/bun:1-debian AS production-deps
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y python3 make g++ && rm -rf /var/lib/apt/lists/*
 
-COPY package*.json ./
+COPY package.json bun.lock ./
 COPY .npmrc ./
 COPY vendor ./vendor
 
-RUN npm ci --omit=dev --ignore-scripts && \
-    npm rebuild better-sqlite3 bcryptjs && \
-    npm cache clean --force
+RUN bun install --production --frozen-lockfile
 
 # Stage 5: Final optimized image
 FROM node:24-slim

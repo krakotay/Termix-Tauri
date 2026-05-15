@@ -1,6 +1,7 @@
 import axios, { AxiosError, type AxiosInstance } from "axios";
 import { toast } from "sonner";
 import { getBasePath } from "@/lib/base-path";
+import { invokeDesktop } from "@/lib/desktop";
 import { isElectron } from "@/lib/electron";
 import { clearTermixSessionStorage } from "@/ui/desktop/navigation/tabs/TabContext";
 import type {
@@ -624,14 +625,9 @@ export async function getServerConfig(): Promise<ServerConfig | null> {
   if (!isElectron()) return null;
 
   try {
-    const result = await (
-      window as Window &
-        typeof globalThis & {
-          IS_ELECTRON?: boolean;
-          electronAPI?: unknown;
-          configuredServerUrl?: string;
-        }
-    ).electronAPI?.invoke("get-server-config");
+    const result = await invokeDesktop<ServerConfig | null>(
+      "get-server-config",
+    );
     return result;
   } catch (error) {
     console.error("Failed to get server config:", error);
@@ -643,14 +639,10 @@ export async function saveServerConfig(config: ServerConfig): Promise<boolean> {
   if (!isElectron()) return false;
 
   try {
-    const result = await (
-      window as Window &
-        typeof globalThis & {
-          IS_ELECTRON?: boolean;
-          electronAPI?: unknown;
-          configuredServerUrl?: string;
-        }
-    ).electronAPI?.invoke("save-server-config", config);
+    const result = await invokeDesktop<{ success?: boolean }>(
+      "save-server-config",
+      config,
+    );
     if (result?.success) {
       configuredServerUrl = config.serverUrl;
       (
@@ -689,17 +681,13 @@ export async function testServerConnection(
   serverUrl: string,
 ): Promise<{ success: boolean; error?: string }> {
   if (!isElectron())
-    return { success: false, error: "Not in Electron environment" };
+    return { success: false, error: "Not in desktop environment" };
 
   try {
-    const result = await (
-      window as Window &
-        typeof globalThis & {
-          IS_ELECTRON?: boolean;
-          electronAPI?: unknown;
-          configuredServerUrl?: string;
-        }
-    ).electronAPI?.invoke("test-server-connection", serverUrl);
+    const result = await invokeDesktop<{ success: boolean; error?: string }>(
+      "test-server-connection",
+      serverUrl,
+    );
     return result;
   } catch (error) {
     console.error("Failed to test server connection:", error);
@@ -724,17 +712,25 @@ export async function checkElectronUpdate(): Promise<{
   error?: string;
 }> {
   if (!isElectron())
-    return { success: false, error: "Not in Electron environment" };
+    return { success: false, error: "Not in desktop environment" };
 
   try {
-    const result = await (
-      window as Window &
-        typeof globalThis & {
-          IS_ELECTRON?: boolean;
-          electronAPI?: unknown;
-          configuredServerUrl?: string;
-        }
-    ).electronAPI?.invoke("check-electron-update");
+    const result = await invokeDesktop<{
+      success: boolean;
+      status?: "up_to_date" | "requires_update" | "beta";
+      localVersion?: string;
+      remoteVersion?: string;
+      latest_release?: {
+        tag_name: string;
+        name: string;
+        published_at: string;
+        html_url: string;
+        body: string;
+      };
+      cached?: boolean;
+      cache_age?: number;
+      error?: string;
+    }>("check-electron-update");
     return result;
   } catch (error) {
     console.error("Failed to check Electron update:", error);
@@ -750,20 +746,11 @@ export async function getEmbeddedServerStatus(): Promise<{
   if (!isElectron()) return null;
 
   try {
-    const result = await (
-      window as Window &
-        typeof globalThis & {
-          IS_ELECTRON?: boolean;
-          electronAPI?: {
-            invoke: (channel: string, ...args: unknown[]) => Promise<unknown>;
-          };
-        }
-    ).electronAPI?.invoke("get-embedded-server-status");
-    return result as {
+    return await invokeDesktop<{
       running: boolean;
       embedded: boolean;
       dataDir: string | null;
-    } | null;
+    } | null>("get-embedded-server-status");
   } catch {
     return null;
   }
