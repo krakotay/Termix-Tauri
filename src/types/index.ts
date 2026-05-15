@@ -1,5 +1,3 @@
-import type { Client } from "ssh2";
-import type { Request } from "express";
 import type { RefObject } from "react";
 
 // ============================================================================
@@ -127,7 +125,7 @@ export interface HostData {
   pin?: boolean;
   authType: "password" | "key" | "credential" | "none" | "opkssh";
   password?: string;
-  key?: File | null;
+  key?: File | string | null;
   keyPassword?: string;
   keyType?: string;
   sudoPassword?: string;
@@ -718,23 +716,6 @@ export interface SnippetFolder {
 }
 
 // ============================================================================
-// BACKEND TYPES
-// ============================================================================
-
-export interface HostConfig {
-  host: SSHHost;
-  tunnels: TunnelConfig[];
-}
-
-export interface VerificationData {
-  conn: Client;
-  timeout: NodeJS.Timeout;
-  startTime: number;
-  attempts: number;
-  maxAttempts: number;
-}
-
-// ============================================================================
 // UTILITY TYPES
 // ============================================================================
 
@@ -743,20 +724,6 @@ export type Optional<T, K extends keyof T> = Omit<T, K> & Partial<Pick<T, K>>;
 export type RequiredFields<T, K extends keyof T> = T & Required<Pick<T, K>>;
 
 export type PartialExcept<T, K extends keyof T> = Partial<T> & Pick<T, K>;
-
-// ============================================================================
-// EXPRESS REQUEST TYPES
-// ============================================================================
-
-export interface AuthenticatedRequest extends Request {
-  userId: string;
-  sessionId?: string;
-  user?: {
-    id: string;
-    username: string;
-    isAdmin: boolean;
-  };
-}
 
 // ============================================================================
 // GITHUB API TYPES

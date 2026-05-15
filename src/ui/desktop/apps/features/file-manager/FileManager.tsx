@@ -309,6 +309,9 @@ function FileManagerContent({ initialHost, onClose }: FileManagerProps) {
   const lastPathChangeRef = useRef<string>("");
   const pathChangeTimerRef = useRef<NodeJS.Timeout | null>(null);
   const currentLoadingPathRef = useRef<string>("");
+  const directoryCacheRef = useRef<
+    Map<string, { files: FileItem[]; loadedAt: number }>
+  >(new Map());
   const keepaliveTimerRef = useRef<NodeJS.Timeout | null>(null);
   const activityLoggedRef = useRef(false);
   const activityLoggingRef = useRef(false);
@@ -385,6 +388,26 @@ function FileManagerContent({ initialHost, onClose }: FileManagerProps) {
 
   const isConnectingRef = useRef(false);
 
+  const setDirectoryFiles = useCallback(
+    (path: string, nextFiles: FileItem[]) => {
+      directoryCacheRef.current.set(path, {
+        files: nextFiles,
+        loadedAt: Date.now(),
+      });
+      setFiles(nextFiles);
+      clearSelection();
+    },
+    [clearSelection],
+  );
+
+  const invalidateDirectoryCache = useCallback((path?: string) => {
+    if (path) {
+      directoryCacheRef.current.delete(path);
+      return;
+    }
+    directoryCacheRef.current.clear();
+  }, []);
+
   async function initializeSSHConnection() {
     if (!currentHost || isConnectingRef.current) return;
 
@@ -450,8 +473,7 @@ function FileManagerContent({ initialHost, onClose }: FileManagerProps) {
         const files = Array.isArray(response)
           ? response
           : response?.files || [];
-        setFiles(files);
-        clearSelection();
+        setDirectoryFiles(currentPath, files);
         initialLoadDoneRef.current = true;
 
         if (!result?.requires_totp) {
@@ -517,7 +539,10 @@ function FileManagerContent({ initialHost, onClose }: FileManagerProps) {
   }
 
   const loadDirectory = useCallback(
-    async (path: string): Promise<boolean> => {
+    async (
+      path: string,
+      options: { force?: boolean; background?: boolean } = {},
+    ): Promise<boolean> => {
       if (!sshSessionId) {
         console.error("Cannot load directory: no SSH session ID");
         return false;
@@ -536,8 +561,23 @@ function FileManagerContent({ initialHost, onClose }: FileManagerProps) {
         }
       }
 
+      const cached = directoryCacheRef.current.get(resolvedPath);
+      if (cached && !options.force) {
+        setFiles(cached.files);
+        clearSelection();
+        setCreateIntent(null);
+
+        if (Date.now() - cached.loadedAt < 15_000) {
+          return true;
+        }
+
+        options = { ...options, background: true };
+      }
+
       currentLoadingPathRef.current = resolvedPath;
-      setIsLoading(true);
+      if (!options.background) {
+        setIsLoading(true);
+      }
 
       setCreateIntent(null);
 
@@ -552,8 +592,7 @@ function FileManagerContent({ initialHost, onClose }: FileManagerProps) {
           ? response
           : response?.files || [];
 
-        setFiles(files);
-        clearSelection();
+        setDirectoryFiles(resolvedPath, files);
         return true;
       } catch (error: unknown) {
         if (currentLoadingPathRef.current === resolvedPath) {
@@ -612,8 +651,10 @@ function FileManagerContent({ initialHost, onClose }: FileManagerProps) {
 
           if (isConnectionError && sshSessionId && currentHost) {
             setIsReconnecting(true);
-            setIsLoading(false);
-            setFiles([]);
+            if (!cached) {
+              setIsLoading(false);
+              setFiles([]);
+            }
             currentLoadingPathRef.current = "";
 
             void (async () => {
@@ -623,7 +664,7 @@ function FileManagerContent({ initialHost, onClose }: FileManagerProps) {
                 try {
                   await ensureSSHConnection();
                   setIsReconnecting(false);
-                  loadDirectory(resolvedPath);
+                  loadDirectory(resolvedPath, { force: true });
                   return;
                 } catch {
                   // keep retrying
@@ -645,12 +686,22 @@ function FileManagerContent({ initialHost, onClose }: FileManagerProps) {
         return false;
       } finally {
         if (currentLoadingPathRef.current === resolvedPath) {
-          setIsLoading(false);
+          if (!options.background) {
+            setIsLoading(false);
+          }
           currentLoadingPathRef.current = "";
         }
       }
     },
-    [sshSessionId, isLoading, clearSelection, t, sudoDialogOpen, currentHost],
+    [
+      sshSessionId,
+      isLoading,
+      clearSelection,
+      setDirectoryFiles,
+      t,
+      sudoDialogOpen,
+      currentHost,
+    ],
   );
 
   const debouncedLoadDirectory = useCallback(
@@ -662,9 +713,9 @@ function FileManagerContent({ initialHost, onClose }: FileManagerProps) {
       pathChangeTimerRef.current = setTimeout(() => {
         if ((force || path !== lastPathChangeRef.current) && sshSessionId) {
           lastPathChangeRef.current = path;
-          loadDirectory(path);
+          loadDirectory(path, { force });
         }
-      }, 150);
+      }, 40);
     },
     [sshSessionId, loadDirectory],
   );
@@ -690,17 +741,17 @@ function FileManagerContent({ initialHost, onClose }: FileManagerProps) {
   const handleRefreshDirectory = useCallback(() => {
     const now = Date.now();
     const DEBOUNCE_MS = 500;
+    invalidateDirectoryCache(currentPath);
 
     if (now - lastRefreshTime < DEBOUNCE_MS) {
       return;
     }
 
     setLastRefreshTime(now);
-    // Force reset loading state to ensure refresh is not blocked
     setIsLoading(false);
     currentLoadingPathRef.current = "";
-    loadDirectory(currentPath);
-  }, [currentPath, lastRefreshTime, loadDirectory]);
+    loadDirectory(currentPath, { force: true });
+  }, [currentPath, invalidateDirectoryCache, lastRefreshTime, loadDirectory]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -1697,8 +1748,7 @@ function FileManagerContent({ initialHost, onClose }: FileManagerProps) {
           const files = Array.isArray(response)
             ? response
             : response?.files || [];
-          setFiles(files);
-          clearSelection();
+          setDirectoryFiles(currentPath, files);
           initialLoadDoneRef.current = true;
           toast.success(t("fileManager.connectedSuccessfully"));
 
@@ -1741,8 +1791,7 @@ function FileManagerContent({ initialHost, onClose }: FileManagerProps) {
           const files = Array.isArray(response)
             ? response
             : response?.files || [];
-          setFiles(files);
-          clearSelection();
+          setDirectoryFiles(currentPath, files);
           initialLoadDoneRef.current = true;
           toast.success(t("fileManager.connectedSuccessfully"));
 
@@ -1838,8 +1887,7 @@ function FileManagerContent({ initialHost, onClose }: FileManagerProps) {
         const files = Array.isArray(response)
           ? response
           : response?.files || [];
-        setFiles(files);
-        clearSelection();
+        setDirectoryFiles(currentPath, files);
         initialLoadDoneRef.current = true;
         toast.success(t("fileManager.connectedSuccessfully"));
         logFileManagerActivity();

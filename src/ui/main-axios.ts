@@ -774,7 +774,7 @@ function getApiUrl(path: string, defaultPort: number): string {
 
   if (electronMode) {
     if (embeddedMode && !configuredServerUrl) {
-      return `http://localhost:${defaultPort}${path}`;
+      return `http://localhost:30001${path}`;
     }
     if (configuredServerUrl) {
       const baseUrl = configuredServerUrl.replace(/\/$/, "");
@@ -1004,6 +1004,17 @@ function handleApiError(error: unknown, operation: string): never {
         422,
         "VALIDATION_ERROR",
       );
+    } else if (status === 501 && code === "NOT_IMPLEMENTED") {
+      apiLogger.error(
+        `Local endpoint missing: ${method} ${url} - ${message}`,
+        error,
+        errorContext,
+      );
+      throw new ApiError(
+        `Local desktop backend does not support this operation yet: ${method} ${url}`,
+        status,
+        "NOT_IMPLEMENTED",
+      );
     } else if (status && status >= 500) {
       apiLogger.error(
         `Server error: ${method} ${url} - ${message}`,
@@ -1069,6 +1080,14 @@ function handleApiError(error: unknown, operation: string): never {
 // SSH HOST MANAGEMENT
 // ============================================================================
 
+async function normalizePrivateKeyForSubmit(
+  key: SSHHostData["key"] | string | undefined,
+): Promise<string | null> {
+  if (!key) return null;
+  if (key instanceof File) return key.text();
+  return typeof key === "string" ? key : null;
+}
+
 export async function getSSHHosts(): Promise<SSHHostWithStatus[]> {
   try {
     const hostsResponse = await sshHostApi.get("/db/host");
@@ -1094,6 +1113,10 @@ export async function getSSHHosts(): Promise<SSHHostWithStatus[]> {
 
 export async function createSSHHost(hostData: SSHHostData): Promise<SSHHost> {
   try {
+    const privateKey =
+      hostData.authType === "key"
+        ? await normalizePrivateKeyForSubmit(hostData.key)
+        : null;
     const submitData = {
       connectionType: hostData.connectionType || "ssh",
       name: hostData.name || "",
@@ -1110,7 +1133,7 @@ export async function createSSHHost(hostData: SSHHostData): Promise<SSHHost> {
           : hostData.authType === "password"
             ? hostData.password
             : null,
-      key: hostData.authType === "key" ? hostData.key : null,
+      key: privateKey,
       keyPassword: hostData.authType === "key" ? hostData.keyPassword : null,
       keyType: hostData.authType === "key" ? hostData.keyType : null,
       credentialId:
@@ -1157,22 +1180,8 @@ export async function createSSHHost(hostData: SSHHostData): Promise<SSHHost> {
       submitData.defaultPath = "";
     }
 
-    if (hostData.authType === "key" && hostData.key instanceof File) {
-      const formData = new FormData();
-      formData.append("key", hostData.key);
-
-      const dataWithoutFile = { ...submitData };
-      delete dataWithoutFile.key;
-      formData.append("data", JSON.stringify(dataWithoutFile));
-
-      const response = await sshHostApi.post("/db/host", formData, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
-      return response.data;
-    } else {
-      const response = await sshHostApi.post("/db/host", submitData);
-      return response.data;
-    }
+    const response = await sshHostApi.post("/db/host", submitData);
+    return response.data;
   } catch (error) {
     throw handleApiError(error, "create SSH host");
   }
@@ -1183,6 +1192,10 @@ export async function updateSSHHost(
   hostData: SSHHostData,
 ): Promise<SSHHost> {
   try {
+    const privateKey =
+      hostData.authType === "key"
+        ? await normalizePrivateKeyForSubmit(hostData.key)
+        : null;
     const submitData = {
       connectionType: hostData.connectionType || "ssh",
       name: hostData.name || "",
@@ -1199,7 +1212,7 @@ export async function updateSSHHost(
           : hostData.authType === "password"
             ? hostData.password
             : null,
-      key: hostData.authType === "key" ? hostData.key : null,
+      key: privateKey,
       keyPassword: hostData.authType === "key" ? hostData.keyPassword : null,
       keyType: hostData.authType === "key" ? hostData.keyType : null,
       credentialId:
@@ -1245,22 +1258,8 @@ export async function updateSSHHost(
       submitData.defaultPath = "";
     }
 
-    if (hostData.authType === "key" && hostData.key instanceof File) {
-      const formData = new FormData();
-      formData.append("key", hostData.key);
-
-      const dataWithoutFile = { ...submitData };
-      delete dataWithoutFile.key;
-      formData.append("data", JSON.stringify(dataWithoutFile));
-
-      const response = await sshHostApi.put(`/db/host/${hostId}`, formData, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
-      return response.data;
-    } else {
-      const response = await sshHostApi.put(`/db/host/${hostId}`, submitData);
-      return response.data;
-    }
+    const response = await sshHostApi.put(`/db/host/${hostId}`, submitData);
+    return response.data;
   } catch (error) {
     throw handleApiError(error, "update SSH host");
   }

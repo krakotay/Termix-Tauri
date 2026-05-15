@@ -1,5 +1,7 @@
+mod local_server;
+
 use serde::{Deserialize, Serialize};
-use std::{fs, time::Duration};
+use std::{fs, sync::Mutex, time::Duration};
 use tauri::{AppHandle, Manager};
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -114,6 +116,11 @@ async fn test_server_connection(server_url: String) -> Result<CommandResult, Str
 
 #[tauri::command]
 fn get_embedded_server_status(app: AppHandle) -> EmbeddedServerStatus {
+    let running = app
+        .state::<Mutex<Option<local_server::LocalServerState>>>()
+        .lock()
+        .map(|state| state.is_some())
+        .unwrap_or(false);
     let data_dir = app
         .path()
         .app_data_dir()
@@ -121,8 +128,8 @@ fn get_embedded_server_status(app: AppHandle) -> EmbeddedServerStatus {
         .map(|path| path.to_string_lossy().to_string());
 
     EmbeddedServerStatus {
-        running: false,
-        embedded: false,
+        running,
+        embedded: true,
         data_dir,
     }
 }
@@ -130,6 +137,19 @@ fn get_embedded_server_status(app: AppHandle) -> EmbeddedServerStatus {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(Mutex::new(None::<local_server::LocalServerState>))
+        .setup(|app| {
+            let handle = app.handle().clone();
+            tauri::async_runtime::block_on(async move {
+                let state = local_server::start(handle.clone()).await?;
+                let managed_state = handle.state::<Mutex<Option<local_server::LocalServerState>>>();
+                *managed_state
+                    .lock()
+                    .map_err(|_| "Failed to store local server state".to_string())? = Some(state);
+                Ok::<(), String>(())
+            })?;
+            Ok(())
+        })
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             get_app_version,

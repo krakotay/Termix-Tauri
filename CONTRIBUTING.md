@@ -23,10 +23,9 @@ Run the following commands:
 
 ```sh
 npm run dev
-npm run dev:backend
 ```
 
-This will start the backend and the frontend Vite server. You can access Termix by going to `http://localhost:5174/`.
+This starts the Tauri app with the Rust local backend and the frontend Vite server.
 
 ## Contributing
 
