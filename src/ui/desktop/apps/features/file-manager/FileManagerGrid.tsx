@@ -22,10 +22,10 @@ import {
   Move,
   GitCompare,
   Edit,
+  Loader2,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { FileItem } from "../../../types/index.js";
-import { SimpleLoader } from "@/ui/desktop/navigation/animations/SimpleLoader.tsx";
 
 interface CreateIntent {
   id: string;
@@ -995,6 +995,14 @@ export function FileManagerGrid({
       </div>
 
       <div className="flex-1 relative overflow-hidden">
+        {isLoading && (
+          <div className="absolute left-3 right-3 top-3 z-20 pointer-events-none">
+            <div className="mx-auto flex w-fit max-w-full items-center gap-2 rounded-md border border-edge bg-elevated/95 px-3 py-2 text-xs text-foreground-secondary shadow-sm backdrop-blur">
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+              <span className="truncate">{t("fileManager.loading")}</span>
+            </div>
+          </div>
+        )}
         <div
           ref={gridRef}
           className={cn(
@@ -1028,7 +1036,20 @@ export function FileManagerGrid({
             </div>
           )}
 
-          {files.length === 0 && !createIntent ? (
+          {files.length === 0 && isLoading && !createIntent ? (
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-4 opacity-70">
+              {Array.from({ length: 16 }).map((_, index) => (
+                <div
+                  key={index}
+                  className="flex flex-col items-center rounded-lg border border-edge/50 p-3"
+                >
+                  <div className="mb-3 h-8 w-8 animate-pulse rounded-md bg-muted" />
+                  <div className="h-3 w-20 animate-pulse rounded bg-muted" />
+                  <div className="mt-2 h-2 w-12 animate-pulse rounded bg-muted/70" />
+                </div>
+              ))}
+            </div>
+          ) : files.length === 0 && !createIntent ? (
             <div className="h-full flex items-center justify-center p-8">
               <div className="text-center">
                 <Folder className="w-16 h-16 mx-auto mb-4 text-muted-foreground/50" />
@@ -1387,7 +1408,6 @@ export function FileManagerGrid({
           document.body,
         )}
 
-      <SimpleLoader visible={isLoading} message={t("common.connecting")} />
     </div>
   );
 }

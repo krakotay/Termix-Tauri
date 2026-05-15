@@ -55,7 +55,6 @@ import {
 } from "@/ui/desktop/navigation/connection-log/ConnectionLogContext.tsx";
 import { ConnectionLog } from "@/ui/desktop/navigation/connection-log/ConnectionLog.tsx";
 import type { LogEntry } from "@/types/connection-log.ts";
-import { SimpleLoader } from "@/ui/desktop/navigation/animations/SimpleLoader.tsx";
 import {
   listSSHFiles,
   resolveSSHPath,
@@ -2632,10 +2631,6 @@ function FileManagerContent({ initialHost, onClose }: FileManagerProps) {
           if (!open) setPendingSudoOperation(null);
         }}
         onSubmit={handleSudoPasswordSubmit}
-      />
-      <SimpleLoader
-        visible={(isReconnecting || isLoading) && !isConnectionLogExpanded}
-        message={t("fileManager.connecting")}
       />
       <ConnectionLog
         isConnecting={isReconnecting || isLoading}

@@ -217,6 +217,16 @@
     "autoDetect": "Auto Detect",
     "authentication": "Authentication"
   },
+  "sshCommandParser": {
+    "label": "Paste SSH Command",
+    "placeholder": "ssh -p 2222 user@example.com -L 8080:127.0.0.1:80",
+    "description": "Termix will fill host fields and add tunnel rows when it sees -L, -R, or -D.",
+    "apply": "Parse",
+    "applied": "SSH command parsed",
+    "appliedWithTunnels": "SSH command parsed and tunnel rows added",
+    "parseFailed": "Could not parse SSH command",
+    "tunnelsNeedHostManager": "Host fields parsed. Open Host Manager to save tunnel options."
+  },
   "dragIndicator": {
     "error": "Error: {{error}}",
     "dragging": "Dragging {{fileName}}",

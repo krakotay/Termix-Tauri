@@ -39,6 +39,7 @@ import { githubLight } from "@uiw/codemirror-theme-github";
 import { EditorView } from "@codemirror/view";
 import { useTheme } from "@/components/theme-provider.tsx";
 import type { SSHHost } from "@/types";
+import { parseSshCommand } from "@/lib/ssh-command-parser.ts";
 
 interface QuickConnectDialogProps {
   open: boolean;
@@ -74,6 +75,7 @@ export function QuickConnectDialog({
   const keyTypeButtonRef = useRef<HTMLButtonElement>(null);
   const keyTypeDropdownRef = useRef<HTMLDivElement>(null);
   const [isConnecting, setIsConnecting] = useState(false);
+  const [sshCommand, setSshCommand] = useState("");
 
   const isDarkMode =
     appTheme === "dark" ||
@@ -266,6 +268,36 @@ export function QuickConnectDialog({
     }
   };
 
+  const handleParseSshCommand = () => {
+    const parsed = parseSshCommand(sshCommand);
+
+    if (!parsed) {
+      toast.error(t("sshCommandParser.parseFailed"));
+      return;
+    }
+
+    form.setValue("ip", parsed.host, {
+      shouldDirty: true,
+      shouldValidate: true,
+    });
+    form.setValue("port", parsed.port || 22, {
+      shouldDirty: true,
+      shouldValidate: true,
+    });
+    if (parsed.username) {
+      form.setValue("username", parsed.username, {
+        shouldDirty: true,
+        shouldValidate: true,
+      });
+    }
+
+    if (parsed.tunnels.length > 0) {
+      toast.info(t("sshCommandParser.tunnelsNeedHostManager"));
+    } else {
+      toast.success(t("sshCommandParser.applied"));
+    }
+  };
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-[600px] bg-canvas border-2 border-edge max-h-[90vh] overflow-y-auto">
@@ -278,6 +310,28 @@ export function QuickConnectDialog({
 
         <Form {...form}>
           <div className="space-y-4 py-4">
+            <div className="rounded-md border border-edge bg-elevated/40 p-3">
+              <Label className="text-sm font-medium">
+                {t("sshCommandParser.label")}
+              </Label>
+              <div className="mt-2 flex gap-2">
+                <Input
+                  value={sshCommand}
+                  onChange={(event) => setSshCommand(event.target.value)}
+                  placeholder={t("sshCommandParser.placeholder")}
+                  className="font-mono text-xs"
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={handleParseSshCommand}
+                  disabled={!sshCommand.trim()}
+                >
+                  {t("sshCommandParser.apply")}
+                </Button>
+              </div>
+            </div>
+
             <div className="grid grid-cols-12 gap-4">
               <FormField
                 control={form.control}

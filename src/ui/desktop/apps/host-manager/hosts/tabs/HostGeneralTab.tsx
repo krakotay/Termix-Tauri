@@ -43,6 +43,7 @@ import { JumpHostItem } from "./shared/JumpHostItem";
 import { testProxyConnection } from "@/ui/main-axios";
 import { toast } from "sonner";
 import type { ProxyNode } from "@/types";
+import { parseSshCommand } from "@/lib/ssh-command-parser.ts";
 
 type JumpHostSelection = { hostId: number };
 
@@ -76,6 +77,51 @@ export function HostGeneralTab({
   t,
 }: HostGeneralTabProps) {
   const [proxyTesting, setProxyTesting] = useState(false);
+  const [sshCommand, setSshCommand] = useState("");
+
+  const handleApplySshCommand = () => {
+    const parsed = parseSshCommand(sshCommand);
+
+    if (!parsed) {
+      toast.error(t("sshCommandParser.parseFailed"));
+      return;
+    }
+
+    form.setValue("connectionType", "ssh", {
+      shouldDirty: true,
+      shouldValidate: true,
+    });
+    form.setValue("ip", parsed.host, {
+      shouldDirty: true,
+      shouldValidate: true,
+    });
+    form.setValue("port", parsed.port || 22, {
+      shouldDirty: true,
+      shouldValidate: true,
+    });
+    if (parsed.username) {
+      form.setValue("username", parsed.username, {
+        shouldDirty: true,
+        shouldValidate: true,
+      });
+    }
+    if (!form.getValues("name")) {
+      form.setValue("name", parsed.host, { shouldDirty: true });
+    }
+
+    if (parsed.tunnels.length > 0) {
+      const existingTunnels = form.getValues("serverTunnels") || [];
+      form.setValue("serverTunnels", [...existingTunnels, ...parsed.tunnels], {
+        shouldDirty: true,
+        shouldValidate: true,
+      });
+      form.setValue("enableTunnel", true, { shouldDirty: true });
+      form.setValue("showTunnelInSidebar", true, { shouldDirty: true });
+      toast.success(t("sshCommandParser.appliedWithTunnels"));
+    } else {
+      toast.success(t("sshCommandParser.applied"));
+    }
+  };
 
   const handleTestProxy = async () => {
     setProxyTesting(true);
@@ -177,6 +223,31 @@ export function HostGeneralTab({
 
   return (
     <div className="pt-2">
+      {connectionType === "ssh" && (
+        <div className="mb-4 rounded-md border border-edge bg-elevated/40 p-3">
+          <FormLabel>{t("sshCommandParser.label")}</FormLabel>
+          <div className="mt-2 flex gap-2">
+            <Input
+              value={sshCommand}
+              onChange={(event) => setSshCommand(event.target.value)}
+              placeholder={t("sshCommandParser.placeholder")}
+              className="font-mono text-xs"
+            />
+            <Button
+              type="button"
+              variant="outline"
+              onClick={handleApplySshCommand}
+              disabled={!sshCommand.trim()}
+            >
+              {t("sshCommandParser.apply")}
+            </Button>
+          </div>
+          <FormDescription className="mt-2">
+            {t("sshCommandParser.description")}
+          </FormDescription>
+        </div>
+      )}
+
       <FormLabel className="mb-3 font-bold">
         {t("hosts.connectionDetails")}
       </FormLabel>
