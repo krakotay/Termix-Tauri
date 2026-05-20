@@ -1,18 +1,30 @@
+use super::{resolve_credential_auth, LocalServerState};
 use axum::{
-    extract::ws::{Message, WebSocket, WebSocketUpgrade},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        State,
+    },
     response::Response,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
 use ssh2::Session;
 use std::{
+    collections::VecDeque,
     io::{Read, Write},
-    net::TcpStream,
-    sync::mpsc as std_mpsc,
+    net::{TcpStream, ToSocketAddrs},
+    sync::mpsc::{self as std_mpsc, TryRecvError},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::mpsc as tokio_mpsc;
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const SSH_OPERATION_TIMEOUT_MS: u32 = 20_000;
+const SSH_KEEPALIVE_INTERVAL_SECS: u32 = 15;
+const SSH_KEEPALIVE_TICK: Duration = Duration::from_secs(10);
+const IDLE_SLEEP: Duration = Duration::from_millis(5);
+const MAX_PENDING_INPUT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,6 +37,8 @@ struct TerminalHostConfig {
     key: Option<String>,
     key_password: Option<String>,
     auth_type: Option<String>,
+    credential_id: Option<i64>,
+    user_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,11 +67,14 @@ enum TerminalCommand {
     Resize { cols: u32, rows: u32 },
 }
 
-pub(crate) async fn terminal_ws(ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(handle_terminal_socket)
+pub(crate) async fn terminal_ws(
+    State(state): State<LocalServerState>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    ws.on_upgrade(move |socket| handle_terminal_socket(state, socket))
 }
 
-async fn handle_terminal_socket(mut socket: WebSocket) {
+async fn handle_terminal_socket(state: LocalServerState, mut socket: WebSocket) {
     let mut input_tx: Option<std_mpsc::Sender<TerminalCommand>> = None;
     let mut output_rx: Option<tokio_mpsc::UnboundedReceiver<Value>> = None;
 
@@ -114,7 +131,7 @@ async fn handle_terminal_socket(mut socket: WebSocket) {
                             continue;
                         };
 
-                        let (new_input_tx, new_output_rx) = spawn_ssh_terminal(connect_data);
+                        let (new_input_tx, new_output_rx) = spawn_ssh_terminal(state.clone(), connect_data);
                         input_tx = Some(new_input_tx);
                         output_rx = Some(new_output_rx);
                     }
@@ -140,7 +157,7 @@ async fn handle_terminal_socket(mut socket: WebSocket) {
                     _ => {}
                 }
             }
-            _ = tokio::time::sleep(Duration::from_millis(2)) => {
+            _ = tokio::time::sleep(Duration::from_millis(8)) => {
                 let mut pending = Vec::new();
                 if let Some(rx) = output_rx.as_mut() {
                     while let Ok(event) = rx.try_recv() {
@@ -158,6 +175,7 @@ async fn handle_terminal_socket(mut socket: WebSocket) {
 }
 
 fn spawn_ssh_terminal(
+    state: LocalServerState,
     connect_data: TerminalConnectData,
 ) -> (
     std_mpsc::Sender<TerminalCommand>,
@@ -167,7 +185,7 @@ fn spawn_ssh_terminal(
     let (output_tx, output_rx) = tokio_mpsc::unbounded_channel::<Value>();
 
     thread::spawn(move || {
-        if let Err(error) = run_ssh_terminal(connect_data, input_rx, output_tx.clone()) {
+        if let Err(error) = run_ssh_terminal(&state, connect_data, input_rx, output_tx.clone()) {
             let message = format!("Failed to connect to host: {error}");
             let event = if error.contains("key is missing") || error.contains("password is missing")
             {
@@ -189,17 +207,20 @@ fn spawn_ssh_terminal(
 }
 
 fn run_ssh_terminal(
+    state: &LocalServerState,
     connect_data: TerminalConnectData,
     input_rx: std_mpsc::Receiver<TerminalCommand>,
     output_tx: tokio_mpsc::UnboundedSender<Value>,
 ) -> Result<(), String> {
-    let host = connect_data.host_config;
-    let tcp = TcpStream::connect(format!("{}:{}", host.ip, host.port))
-        .map_err(|error| format!("TCP connection failed: {error}"))?;
-    tcp.set_read_timeout(Some(Duration::from_millis(50))).ok();
+    let mut host = connect_data.host_config;
+    apply_terminal_credential(state, &mut host)?;
+    let tcp = connect_tcp(&host.ip, host.port)?;
+    tcp.set_nodelay(true).ok();
+    tcp.set_read_timeout(Some(Duration::from_secs(5))).ok();
     tcp.set_write_timeout(Some(Duration::from_secs(10))).ok();
 
     let mut session = Session::new().map_err(|error| format!("SSH session failed: {error}"))?;
+    session.set_timeout(SSH_OPERATION_TIMEOUT_MS);
     session.set_tcp_stream(tcp);
     session
         .handshake()
@@ -252,27 +273,40 @@ fn run_ssh_terminal(
     channel
         .shell()
         .map_err(|error| format!("Shell request failed: {error}"))?;
+    session.set_keepalive(true, SSH_KEEPALIVE_INTERVAL_SECS);
     session.set_blocking(false);
 
     let _ = output_tx.send(json!({ "type": "connected", "message": "SSH connected" }));
 
     let mut buffer = [0_u8; 8192];
+    let mut pending_input = VecDeque::<u8>::new();
+    let mut next_keepalive = Instant::now() + SSH_KEEPALIVE_TICK;
     loop {
-        while let Ok(command) = input_rx.try_recv() {
-            match command {
-                TerminalCommand::Input(input) => {
-                    channel
-                        .write_all(input.as_bytes())
-                        .map_err(|error| format!("SSH write failed: {error}"))?;
-                    channel.flush().ok();
-                }
-                TerminalCommand::Resize { cols, rows } => {
-                    channel
-                        .request_pty_size(cols, rows, None, None)
-                        .map_err(|error| format!("PTY resize failed: {error}"))?;
+        loop {
+            match input_rx.try_recv() {
+                Ok(command) => match command {
+                    TerminalCommand::Input(input) => {
+                        if pending_input.len() + input.len() > MAX_PENDING_INPUT_BYTES {
+                            return Err("SSH input buffer is full".to_string());
+                        }
+                        pending_input.extend(input.bytes());
+                    }
+                    TerminalCommand::Resize { cols, rows } => {
+                        channel
+                            .request_pty_size(cols, rows, None, None)
+                            .map_err(|error| format!("PTY resize failed: {error}"))?;
+                    }
+                },
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    let _ = channel.close();
+                    let _ = channel.wait_close();
+                    return Ok(());
                 }
             }
         }
+
+        flush_pending_input(&mut channel, &mut pending_input)?;
 
         match channel.read(&mut buffer) {
             Ok(0) => {
@@ -289,7 +323,93 @@ fn run_ssh_terminal(
             Err(error) => return Err(format!("SSH read failed: {error}")),
         }
 
-        thread::sleep(Duration::from_millis(1));
+        if Instant::now() >= next_keepalive {
+            match session.keepalive_send() {
+                Ok(seconds) => {
+                    let delay = if seconds == 0 {
+                        SSH_KEEPALIVE_TICK
+                    } else {
+                        Duration::from_secs(u64::from(seconds))
+                    };
+                    next_keepalive = Instant::now() + delay.min(SSH_KEEPALIVE_TICK);
+                }
+                Err(error) => {
+                    let io_error = std::io::Error::from(error);
+                    if io_error.kind() != std::io::ErrorKind::WouldBlock {
+                        return Err(format!("SSH keepalive failed: {io_error}"));
+                    }
+                    next_keepalive = Instant::now() + Duration::from_millis(250);
+                }
+            }
+        }
+
+        thread::sleep(IDLE_SLEEP);
+    }
+
+    Ok(())
+}
+
+fn apply_terminal_credential(
+    state: &LocalServerState,
+    host: &mut TerminalHostConfig,
+) -> Result<(), String> {
+    if host.auth_type.as_deref() != Some("credential") {
+        return Ok(());
+    }
+
+    let Some(credential) =
+        resolve_credential_auth(state, host.credential_id, host.user_id.as_deref())?
+    else {
+        return Err("Credential is required".to_string());
+    };
+
+    if let Some(username) = credential.username {
+        host.username = username;
+    }
+    host.password = credential.password;
+    host.key = credential.key;
+    host.key_password = credential.key_password;
+    host.auth_type = Some(credential.auth_type);
+    Ok(())
+}
+
+fn connect_tcp(host: &str, port: u16) -> Result<TcpStream, String> {
+    let address = format!("{host}:{port}");
+    let addresses = address
+        .to_socket_addrs()
+        .map_err(|error| format!("Failed to resolve {address}: {error}"))?;
+
+    let mut last_error = None;
+    for socket_address in addresses {
+        match TcpStream::connect_timeout(&socket_address, CONNECT_TIMEOUT) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    Err(format!(
+        "TCP connection failed: {}",
+        last_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "no resolved addresses".to_string())
+    ))
+}
+
+fn flush_pending_input(
+    channel: &mut ssh2::Channel,
+    pending_input: &mut VecDeque<u8>,
+) -> Result<(), String> {
+    while !pending_input.is_empty() {
+        let contiguous = pending_input.make_contiguous();
+        match channel.write(contiguous) {
+            Ok(0) => break,
+            Ok(bytes_written) => {
+                pending_input.drain(..bytes_written);
+                channel.flush().ok();
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) => return Err(format!("SSH write failed: {error}")),
+        }
     }
 
     Ok(())

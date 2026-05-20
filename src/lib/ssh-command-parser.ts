@@ -191,8 +191,11 @@ export function parseSshCommand(command: string): ParsedSshCommand | null {
     }
 
     if (!token.startsWith("-")) {
+      if (destination) {
+        continue;
+      }
       destination = token;
-      break;
+      continue;
     }
 
     const option = token.slice(1, 2);

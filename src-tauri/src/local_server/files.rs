@@ -1,4 +1,4 @@
-use super::{ApiError, LocalServerState};
+use super::{resolve_credential_auth, ApiError, LocalServerState};
 use axum::{extract::Query, extract::State, Json};
 use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
@@ -7,10 +7,15 @@ use ssh2::{Session, Sftp};
 use std::{
     collections::HashMap,
     io::{Read, Write},
-    net::TcpStream,
+    net::{TcpStream, ToSocketAddrs},
     path::Path as FsPath,
     sync::{Arc, Mutex},
+    time::Duration,
 };
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const SSH_OPERATION_TIMEOUT_MS: u32 = 20_000;
+const SSH_KEEPALIVE_INTERVAL_SECS: u32 = 15;
 
 pub(crate) type FileSessions = Arc<Mutex<HashMap<String, FileSession>>>;
 
@@ -36,6 +41,8 @@ pub(crate) struct FileSessionConfig {
     ssh_key: Option<String>,
     key_password: Option<String>,
     auth_type: Option<String>,
+    credential_id: Option<i64>,
+    user_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -107,7 +114,7 @@ pub(crate) async fn file_connect(
         .session_id
         .clone()
         .ok_or_else(|| ApiError::bad_request("sessionId is required"))?;
-    let ssh_session = connect_file_session(&config)?;
+    let ssh_session = connect_file_session(&state, &config)?;
     state
         .file_sessions
         .lock()
@@ -161,10 +168,20 @@ pub(crate) async fn file_keepalive(
     Json(payload): Json<SessionRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let session = file_session(&state, &payload.session_id).ok();
-    let connected = session
-        .as_ref()
-        .and_then(|session| session.session.lock().ok())
-        .is_some_and(|session| session.authenticated());
+    let connected = session.as_ref().is_some_and(|file_session| {
+        file_session.session.lock().ok().is_some_and(|session| {
+            if !session.authenticated() {
+                return false;
+            }
+            match session.keepalive_send() {
+                Ok(_) => true,
+                Err(error) => {
+                    let io_error = std::io::Error::from(error);
+                    io_error.kind() == std::io::ErrorKind::WouldBlock
+                }
+            }
+        })
+    });
     Ok(Json(
         json!({ "success": connected, "connected": connected }),
     ))
@@ -371,7 +388,7 @@ fn file_sftp(state: &LocalServerState, session_id: &str) -> Result<Sftp, ApiErro
         .map_err(|_| ApiError::internal("SSH session lock poisoned"))?;
     if !session.authenticated() {
         drop(session);
-        let reconnected = connect_file_session(&file_session.config)?;
+        let reconnected = connect_file_session(state, &file_session.config)?;
         let mut stored = file_session
             .session
             .lock()
@@ -386,11 +403,19 @@ fn file_sftp(state: &LocalServerState, session_id: &str) -> Result<Sftp, ApiErro
         .map_err(|error| ApiError::internal(format!("Failed to open SFTP: {error}")))
 }
 
-fn connect_file_session(config: &FileSessionConfig) -> Result<Session, ApiError> {
-    let tcp = TcpStream::connect(format!("{}:{}", config.ip, config.port))
-        .map_err(|error| ApiError::bad_request(format!("TCP connection failed: {error}")))?;
+fn connect_file_session(
+    state: &LocalServerState,
+    config: &FileSessionConfig,
+) -> Result<Session, ApiError> {
+    let mut config = config.clone();
+    apply_file_credential(state, &mut config)?;
+    let tcp = connect_tcp(&config.ip, config.port)?;
+    tcp.set_nodelay(true).ok();
+    tcp.set_read_timeout(Some(Duration::from_secs(20))).ok();
+    tcp.set_write_timeout(Some(Duration::from_secs(20))).ok();
     let mut session = Session::new()
         .map_err(|error| ApiError::internal(format!("SSH session failed: {error}")))?;
+    session.set_timeout(SSH_OPERATION_TIMEOUT_MS);
     session.set_tcp_stream(tcp);
     session
         .handshake()
@@ -424,7 +449,53 @@ fn connect_file_session(config: &FileSessionConfig) -> Result<Session, ApiError>
     if !session.authenticated() {
         return Err(ApiError::bad_request("SSH authentication failed"));
     }
+    session.set_keepalive(true, SSH_KEEPALIVE_INTERVAL_SECS);
     Ok(session)
+}
+
+fn apply_file_credential(
+    state: &LocalServerState,
+    config: &mut FileSessionConfig,
+) -> Result<(), ApiError> {
+    if config.auth_type.as_deref() != Some("credential") {
+        return Ok(());
+    }
+
+    let credential =
+        resolve_credential_auth(state, config.credential_id, config.user_id.as_deref())
+            .map_err(ApiError::bad_request)?
+            .ok_or_else(|| ApiError::bad_request("Credential is required"))?;
+
+    if let Some(username) = credential.username {
+        config.username = username;
+    }
+    config.password = credential.password;
+    config.ssh_key = credential.key;
+    config.key_password = credential.key_password;
+    config.auth_type = Some(credential.auth_type);
+    Ok(())
+}
+
+fn connect_tcp(host: &str, port: u16) -> Result<TcpStream, ApiError> {
+    let address = format!("{host}:{port}");
+    let addresses = address
+        .to_socket_addrs()
+        .map_err(|error| ApiError::bad_request(format!("Failed to resolve {address}: {error}")))?;
+
+    let mut last_error = None;
+    for socket_address in addresses {
+        match TcpStream::connect_timeout(&socket_address, CONNECT_TIMEOUT) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    Err(ApiError::bad_request(format!(
+        "TCP connection failed: {}",
+        last_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "no resolved addresses".to_string())
+    )))
 }
 
 fn write_remote_file(

@@ -3770,6 +3770,10 @@ export async function detectKeyType(
     });
     return response.data;
   } catch (error) {
+    const localType = detectLocalPrivateKeyType(privateKey);
+    if (localType) {
+      return { success: true, keyType: localType, localDetection: true };
+    }
     throw handleApiError(error, "detect key type");
   }
 }
@@ -3783,8 +3787,80 @@ export async function detectPublicKeyType(
     });
     return response.data;
   } catch (error) {
+    const localType =
+      detectLocalPublicKeyType(publicKey) || detectLocalPrivateKeyType(publicKey);
+    if (localType) {
+      return { success: true, keyType: localType, localDetection: true };
+    }
     throw handleApiError(error, "detect public key type");
   }
+}
+
+function detectLocalPublicKeyType(publicKey: string): string | null {
+  const type = publicKey.trim().split(/\s+/, 1)[0];
+  return normalizeSshKeyType(type);
+}
+
+function detectLocalPrivateKeyType(privateKey: string): string | null {
+  const trimmed = privateKey.trim();
+  if (!trimmed) return null;
+
+  if (/BEGIN RSA PRIVATE KEY/.test(trimmed)) return "ssh-rsa";
+  if (/BEGIN DSA PRIVATE KEY/.test(trimmed)) return "ssh-dss";
+  if (/BEGIN EC PRIVATE KEY/.test(trimmed)) return "ecdsa-sha2-nistp256";
+
+  if (/BEGIN OPENSSH PRIVATE KEY/.test(trimmed)) {
+    const body = trimmed
+      .split(/\r?\n/)
+      .filter((line) => line && !line.startsWith("-----"))
+      .join("");
+    const decoded = decodeBase64ToBinaryString(body);
+    if (!decoded) return "unknown";
+
+    for (const type of [
+      "ssh-ed25519",
+      "ecdsa-sha2-nistp521",
+      "ecdsa-sha2-nistp384",
+      "ecdsa-sha2-nistp256",
+      "ssh-rsa",
+      "ssh-dss",
+    ]) {
+      if (decoded.includes(type)) return type;
+    }
+    return "unknown";
+  }
+
+  return null;
+}
+
+function decodeBase64ToBinaryString(value: string): string | null {
+  try {
+    if (typeof atob === "function") {
+      return atob(value);
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function normalizeSshKeyType(type: string | undefined): string | null {
+  if (!type) return null;
+  if (
+    [
+      "ssh-rsa",
+      "ssh-ed25519",
+      "ecdsa-sha2-nistp256",
+      "ecdsa-sha2-nistp384",
+      "ecdsa-sha2-nistp521",
+      "ssh-dss",
+      "rsa-sha2-256",
+      "rsa-sha2-512",
+    ].includes(type)
+  ) {
+    return type;
+  }
+  return null;
 }
 
 export async function validateKeyPair(
